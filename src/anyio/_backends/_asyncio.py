@@ -536,11 +536,13 @@ class _AsyncioTaskStatus(abc.TaskStatus):
         self.task = None
 
     def started(self, value: object = None) -> None:
+        if self.task is None:
+            return
         try:
             self._future.set_result(value)
         except asyncio.InvalidStateError:
             raise RuntimeError("called 'started' twice on the same task status") from None
-        _task_states[self.task].parent_id = self._parent_id  # type: ignore[index]
+        _task_states[self.task].parent_id = self._parent_id
 
 
 class TaskGroup(abc.TaskGroup):
