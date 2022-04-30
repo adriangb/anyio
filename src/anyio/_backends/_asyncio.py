@@ -138,6 +138,16 @@ _native_task_names = hasattr(asyncio.Task, 'get_name')
 _root_task: RunVar[Optional[asyncio.Task]] = RunVar('_root_task')
 
 
+def wrap_user_task_to_set_task_status_task(
+    coro: Awaitable[Any],
+    task_status: "_AsyncioTaskStatus"
+) -> Coroutine[Any, Any, Any]:
+    async def wrapped() -> None:
+        task_status.task = current_task()
+        await coro
+    return wrapped()
+
+
 def find_root_task() -> asyncio.Task:
     root_task = _root_task.get(None)
     if root_task is not None and not root_task.done():
@@ -518,18 +528,19 @@ class ExceptionGroup(BaseExceptionGroup):
 
 
 class _AsyncioTaskStatus(abc.TaskStatus):
+    task: Optional[asyncio.Task[Any]]
+
     def __init__(self, future: asyncio.Future, parent_id: int):
         self._future = future
         self._parent_id = parent_id
+        self.task = None
 
     def started(self, value: object = None) -> None:
         try:
             self._future.set_result(value)
         except asyncio.InvalidStateError:
             raise RuntimeError("called 'started' twice on the same task status") from None
-
-        task = cast(asyncio.Task, current_task())
-        _task_states[task].parent_id = self._parent_id
+        _task_states[self.task].parent_id = self._parent_id  # type: ignore[index]
 
 
 class TaskGroup(abc.TaskGroup):
@@ -659,16 +670,22 @@ class TaskGroup(abc.TaskGroup):
             options['name'] = name
 
         kwargs = {}
+        task_status = None
         if task_status_future:
             parent_id = id(current_task())
-            kwargs['task_status'] = _AsyncioTaskStatus(task_status_future,
-                                                       id(self.cancel_scope._host_task))
+            task_status = kwargs['task_status'] = _AsyncioTaskStatus(
+                task_status_future,
+                id(self.cancel_scope._host_task),
+            )
         else:
             parent_id = id(self.cancel_scope._host_task)
 
         coro = func(*args, **kwargs)
         if not asyncio.iscoroutine(coro):
             raise TypeError(f'Expected an async function, but {func} appears to be synchronous')
+
+        if task_status is not None:
+            coro = wrap_user_task_to_set_task_status_task(coro, task_status)
 
         foreign_coro = not hasattr(coro, 'cr_frame') and not hasattr(coro, 'gi_frame')
         if foreign_coro or sys.version_info < (3, 8):
